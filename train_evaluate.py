@@ -1,7 +1,4 @@
 import numpy as np
-import torch
-from transformers import BertTokenizer, BertModel
-from tqdm import tqdm
 
 from sklearn.model_selection import StratifiedKFold, cross_val_score
 from sklearn.feature_extraction.text import CountVectorizer
@@ -120,6 +117,12 @@ def extract_features_with_bert(
     :return: A numpy array containing the extracted features.
     :rtype: np.ndarray
     """
+    # Heavy deps imported lazily so the bag-of-words + statistics path (and the
+    # tests) run without torch/transformers installed.
+    import torch
+    from transformers import BertTokenizer, BertModel
+    from tqdm import tqdm
+
     # Check if GPU is available and set the device accordingly
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
