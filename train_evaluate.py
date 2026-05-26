@@ -3,101 +3,99 @@ import torch
 from transformers import BertTokenizer, BertModel
 from tqdm import tqdm
 
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold, cross_val_score
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.naive_bayes import GaussianNB, MultinomialNB
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.metrics import accuracy_score, classification_report
+from sklearn.metrics import accuracy_score
+
+N_SPLITS = 5
+RANDOM_STATE = 42
+
+
+def _bow_classifiers():
+    """Classifiers for bag-of-words (count) features."""
+    return {
+        "Naive Bayes": MultinomialNB(),  # counts -> MultinomialNB is appropriate
+        "KNN": KNeighborsClassifier(),
+        "Random Forest": RandomForestClassifier(random_state=RANDOM_STATE),
+        "Gradient Boosting": GradientBoostingClassifier(random_state=RANDOM_STATE),
+    }
+
+
+def _bert_classifiers():
+    """Classifiers for dense BERT embeddings.
+
+    Uses ``GaussianNB`` rather than ``MultinomialNB`` because BERT embeddings are
+    real-valued (and include negatives); ``MultinomialNB`` only accepts counts.
+    """
+    return {
+        "Naive Bayes": GaussianNB(),
+        "KNN": KNeighborsClassifier(),
+        "Random Forest": RandomForestClassifier(random_state=RANDOM_STATE),
+        "Gradient Boosting": GradientBoostingClassifier(random_state=RANDOM_STATE),
+    }
+
+
+def _per_fold_accuracy(model, X, y, n_splits=N_SPLITS):
+    """Accuracy of a fitted model on each stratified fold of (X, y).
+
+    Yields a *distribution* of scores (one per fold) so the downstream paired
+    t-tests have comparable samples instead of a single number.
+    """
+    y = np.asarray(y)
+    y_pred = model.predict(X)
+    cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=RANDOM_STATE)
+    return [accuracy_score(y[idx], y_pred[idx]) for _, idx in cv.split(X, y)]
 
 
 def train_classifiers(data):
-    """
-    Train classifiers on the given dataset.
+    """Train bag-of-words classifiers, scored with stratified k-fold CV.
 
-    This function splits the data into training and testing sets, vectorizes the text data,
-    and trains Naive Bayes classifiers on the training data. It then evaluates the trained
-    classifiers on the test data.
-
-    :param data: The dataset containing messages and labels.
+    :param data: dataset with ``message`` and ``label`` columns.
     :type data: pandas.DataFrame
-    :return: A tuple containing the trained models, their scores, and the vectorizer.
+    :return: ``(trained_models, scores, vectorizer)`` — each ``scores[name]`` holds
+        the mean accuracy and the per-fold scores used for statistical testing.
     :rtype: tuple(dict, dict, CountVectorizer)
     """
-    # Vectorizer for transforming text data to numerical data
     vectorizer = CountVectorizer(analyzer=lambda x: x)
-
-    # Split the data into training and testing sets
-    X = data["message"]
+    X = vectorizer.fit_transform(data["message"])
     y = data["label"]
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
-    )
-
-    # Fit and transform the data using the vectorizer
-    X_train_vec = vectorizer.fit_transform(X_train)
-    X_test_vec = vectorizer.transform(X_test)
-
-    # Initialize the classifiers
-    classifiers = {
-        "Naive Bayes": MultinomialNB(),
-        "KNN": KNeighborsClassifier(),
-        "Random Forest": RandomForestClassifier(),
-        "Gradient Boosting": GradientBoostingClassifier(),
-    }
+    cv = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
 
     trained_models = {}
     scores = {}
-
-    # Train each classifier and evaluate
-    for name, clf in classifiers.items():
-        clf.fit(X_train_vec, y_train)
-        y_pred = clf.predict(X_test_vec)
-        acc = accuracy_score(y_test, y_pred)
-        report = classification_report(y_test, y_pred)
+    for name, clf in _bow_classifiers().items():
+        fold_scores = cross_val_score(clf, X, y, cv=cv, scoring="accuracy")
+        clf.fit(X, y)  # refit on all data for later evaluation on the drift set
         trained_models[name] = clf
-        scores[name] = {"accuracy": acc, "report": report}
-        print(f"Classifier: {name}")
-        print(f"Accuracy: {acc}")
-        print(f"Classification Report:\n{report}")
+        scores[name] = {
+            "accuracy": float(fold_scores.mean()),
+            "fold_scores": fold_scores.tolist(),
+        }
+        print(f"{name}: CV accuracy {fold_scores.mean():.4f} (+/- {fold_scores.std():.4f})")
 
     return trained_models, scores, vectorizer
 
 
 def evaluate_models(trained_models, vectorizer, data):
-    """
-    Evaluate trained classifiers on a new dataset.
+    """Evaluate already-trained models on a new (e.g. drifted) dataset, per fold.
 
-    This function transforms the text data using the provided vectorizer and evaluates
-    each trained classifier on the data.
-
-    :param trained_models: A dictionary of trained models.
-    :type trained_models: dict
-    :param vectorizer: The vectorizer used to transform the text data.
-    :type vectorizer: CountVectorizer
-    :param data: The dataset containing messages and labels.
-    :type data: pandas.DataFrame
-    :return: A dictionary of scores for each classifier.
+    :return: ``scores`` dict with mean accuracy and per-fold scores per classifier.
     :rtype: dict
     """
-    # Extract messages and labels from data
-    X = data["message"]
+    X = vectorizer.transform(data["message"])
     y = data["label"]
 
-    # Transform the data using the provided vectorizer
-    X_vec = vectorizer.transform(X)
-
     scores = {}
-
-    # Evaluate each trained model on the data
     for name, model in trained_models.items():
-        y_pred = model.predict(X_vec)
-        acc = accuracy_score(y, y_pred)
-        report = classification_report(y, y_pred)
-        scores[name] = {"accuracy": acc, "report": report}
-        print(f"Classifier: {name}")
-        print(f"Accuracy: {acc}")
-        print(f"Classification Report:\n{report}")
+        fold_scores = _per_fold_accuracy(model, X, y)
+        scores[name] = {
+            "accuracy": float(np.mean(fold_scores)),
+            "fold_scores": fold_scores,
+        }
+        print(f"{name}: drift accuracy {np.mean(fold_scores):.4f}")
 
     return scores
 
@@ -164,78 +162,48 @@ def extract_features_with_bert(
 
 
 def train_classifiers_with_bert_features(data, features):
-    """
-    Train classifiers on BERT-extracted features.
+    """Train classifiers on BERT-extracted features, scored with stratified k-fold CV.
 
-    This function splits the BERT features and labels into training and testing sets, trains
-    several classifiers on the training data, and evaluates them on the test data.
-
-    :param data: The dataset containing labels.
+    :param data: dataset containing the ``label`` column.
     :type data: pandas.DataFrame
-    :param features: The BERT-extracted features.
+    :param features: BERT-extracted features.
     :type features: np.ndarray
-    :return: A tuple containing the trained models and their scores.
+    :return: ``(trained_models, scores)`` with mean + per-fold accuracy per classifier.
     :rtype: tuple(dict, dict)
     """
-    labels = data["label"].values
-
-    # Split the data into training and testing sets
-    X_train, X_test, y_train, y_test = train_test_split(
-        features, labels, test_size=0.2, random_state=42
-    )
-
-    # Initialize the classifiers
-    classifiers = {
-        "Naive Bayes": MultinomialNB(),
-        "KNN": KNeighborsClassifier(),
-        "Random Forest": RandomForestClassifier(),
-        "Gradient Boosting": GradientBoostingClassifier(),
-    }
+    y = data["label"].values
+    cv = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
 
     trained_models = {}
     scores = {}
-
-    # Train each classifier and evaluate
-    for name, clf in classifiers.items():
-        print(f"Training {name} classifier...")
-        clf.fit(X_train, y_train)
-        y_pred = clf.predict(X_test)
-        acc = accuracy_score(y_test, y_pred)
-        report = classification_report(y_test, y_pred)
+    for name, clf in _bert_classifiers().items():
+        fold_scores = cross_val_score(clf, features, y, cv=cv, scoring="accuracy")
+        clf.fit(features, y)
         trained_models[name] = clf
-        scores[name] = {"accuracy": acc, "report": report}
-        print(f"Classifier: {name}")
-        print(f"Accuracy: {acc}")
-        print(f"Classification Report:\n{report}")
+        scores[name] = {
+            "accuracy": float(fold_scores.mean()),
+            "fold_scores": fold_scores.tolist(),
+        }
+        print(f"{name}: BERT CV accuracy {fold_scores.mean():.4f} (+/- {fold_scores.std():.4f})")
+
     return trained_models, scores
 
 
 def bert_evaluate_models(trained_models, features, data):
-    """
-    Evaluate trained classifiers on BERT-extracted features.
+    """Evaluate trained classifiers on BERT features of a new dataset, per fold.
 
-    This function evaluates each trained classifier on the provided BERT features and labels.
-
-    :param trained_models: A dictionary of trained models.
-    :type trained_models: dict
-    :param features: The BERT-extracted features.
-    :type features: np.ndarray
-    :param data: The dataset containing labels.
-    :type data: pandas.DataFrame
-    :return: A dictionary of scores for each classifier.
+    :return: ``scores`` dict with mean accuracy and per-fold scores per classifier.
     :rtype: dict
     """
-    labels = data["label"].values
+    y = data["label"].values
 
     scores = {}
-
-    # Evaluate each trained model on the data
     for name, model in trained_models.items():
-        y_pred = model.predict(features)
-        acc = accuracy_score(labels, y_pred)
-        report = classification_report(labels, y_pred)
-        scores[name] = {"accuracy": acc, "report": report}
-        print(f"Classifier: {name}")
-        print(f"Accuracy: {acc}")
-        print(f"Classification Report:\n{report}")
+        fold_scores = _per_fold_accuracy(model, features, y)
+        scores[name] = {
+            "accuracy": float(np.mean(fold_scores)),
+            "fold_scores": fold_scores,
+        }
+        print(f"{name}: BERT drift accuracy {np.mean(fold_scores):.4f}")
+
     return scores

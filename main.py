@@ -81,14 +81,10 @@ def main(original_data_path, drifted_data_path, output_folder):
             "bert_encoded_features_original.csv", regular_features, delimiter=","
         )
         np.savetxt("bert_encoded_features_drifted.csv", drifted_features, delimiter=",")
-    
-    # Add 10 to every value in the features to avoid negative values
-    regular_features += 10
-    drifted_features += 10
-    # print(regular_features, drifted_features)
-    print(np.min(regular_features), np.min(drifted_features))
 
     # Step 4: Train classifiers on BERT features
+    # (GaussianNB handles the real-valued BERT embeddings directly, so no
+    # offset hack is needed to keep features non-negative.)
     print("Training classifiers on BERT features on regular data...")
     bert_trained_models, bert_scores = train_classifiers_with_bert_features(
         regular_df, regular_features

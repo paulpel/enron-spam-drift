@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Generated artifacts
+*.pkl
+bert_encoded_features_*.csv
+comparison_*.csv
