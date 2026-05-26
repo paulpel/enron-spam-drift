@@ -16,8 +16,8 @@ This project aims to train and evaluate classifiers for detecting spam emails us
 
 1. Clone the repository:
     ```bash
-    git clone https://github.com/paulpel/Spam_Detection.git
-    cd Spam_Detection
+    git clone https://github.com/paulpel/enron-spam-drift.git
+    cd enron-spam-drift
     ```
 
 2. Create a virtual environment and activate it:
@@ -38,11 +38,16 @@ This project aims to train and evaluate classifiers for detecting spam emails us
 
 ## Usage
 
-To run the main script and train the classifiers:
+To run the main script and train the classifiers (the last argument is the
+output folder for the comparison CSVs — use `.` for the current directory):
 
 ```bash
-python main.py enron_spam_data.csv processed_data.csv /
+python main.py enron_spam_data.csv processed_data.csv .
 ```
+
+Each classifier is scored with 5-fold stratified cross-validation, and the
+conditions (normal vs drifted, bag-of-words vs BERT) are compared with paired
+t-tests over the per-fold scores.
 
 ## Scripts Overview
 
